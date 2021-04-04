@@ -4,20 +4,44 @@ import time
 
 NOME_DO_PROCESSO = "PEER_A"
 
-OUTROS_PROCESSOS = ["PEER_B"]
+OUTROS_PROCESSOS = ["PEER_B", "PEER_C"]
 
 RECURSOS_COMPARTILHADOS =  {
-    "RECURSO_A": "HELD", 
-    "RECURSO_B": "RELEASED"
+    "RECURSO_A": {
+        "status": "RELEASED",
+        "timestamp": None,
+        "fila": list(),
+        "aguardando_retorno": list() # Problema de quando o mesmo processo requisita o mesmo recurso depois de outro processo ter requisitado
+    }, 
+    "RECURSO_B": {
+        "status": "RELEASED",
+        "timestamp": None,
+        "fila": list(),
+        "aguardando_retorno": list() # Problema de quando o mesmo processo requisita o mesmo recurso depois de outro processo ter requisitado
+    }
 }
 
 @Pyro5.api.expose
 class StateChecker(object):
-    def checkState(self, recurso):
-        while RECURSOS_COMPARTILHADOS[recurso] == "HELD":
-            time.sleep(1)
-        return RECURSOS_COMPARTILHADOS[recurso]
-    
+    def receberInscricao(self, recurso, timestamp, processo):
+        if RECURSOS_COMPARTILHADOS[recurso]["status"] == "RELEASED":
+            return "RECURSO_LIVRE"
+        elif (RECURSOS_COMPARTILHADOS[recurso]["status"] == "WANTED" and 
+              RECURSOS_COMPARTILHADOS[recurso]["timestamp"] > timestamp):
+            return "RECURSO_LIVRE"
+        else:
+            RECURSOS_COMPARTILHADOS[recurso]["fila"].append(processo)
+            return "RECURSO_OCUPADO"
+
+    def enviarNotificacao(self, recurso, processo):
+        # Removemos o processo da lista em que estamos aguardando a resposta
+        RECURSOS_COMPARTILHADOS[recurso]["aguardando_retorno"].remove(processo)
+
+        # Se a lsita estiver vazia, quer dizer que recebemos todas as respostas e 
+        # que podemos utilizar o processo
+        if len(RECURSOS_COMPARTILHADOS[recurso]["aguardando_retorno"]) == 0:
+            RECURSOS_COMPARTILHADOS[recurso]["status"] = "HELD"
+
 
 def menu():
     print(f"MENU DO PROCESSO {NOME_DO_PROCESSO}")
@@ -37,17 +61,43 @@ def menu():
     if escolha == "1":
         print(f"O status do {recurso_escolhido} é: {RECURSOS_COMPARTILHADOS[recurso_escolhido]}")
     elif escolha == "2":
-        RECURSOS_COMPARTILHADOS[recurso_escolhido] = "RELEASED"
+        # Mudamos o status do recurso para RELEASED
+        RECURSOS_COMPARTILHADOS[recurso_escolhido]["status"] = "RELEASED"
+        
+        processos_notificados = list()
+        #Para cada processo que estava na fila para usar esse recurso
+        for processo in RECURSOS_COMPARTILHADOS[recurso_escolhido]["fila"]:
+            #Nos conectamos e enviamos a notificacao de que o processo está livre agora
+            conexao = Pyro5.api.Proxy(f"PYRONAME:{processo}")
+            conexao.enviarNotificacao(recurso_escolhido, NOME_DO_PROCESSO)
+
+            # Removemos o pedido da fila
+            processos_notificados.append(processo)
+
+        for processo in processos_notificados:
+            RECURSOS_COMPARTILHADOS[recurso_escolhido]["fila"].remove(processo)
+
+        # Printamos para o usuario que o recurso foi liberado
         print(f"O status do {recurso_escolhido} foi alterado.")
     elif escolha == "3":
-        RECURSOS_COMPARTILHADOS[recurso_escolhido] = "WANTED"
+        # Mudamos o status do recurso para WANTED
+        RECURSOS_COMPARTILHADOS[recurso_escolhido]["status"] = "WANTED"
+        # Guardamos o timestamp em que o recurso foi solicitado
+        timestamp = time.time()
+        RECURSOS_COMPARTILHADOS[recurso_escolhido]["timestamp"] = timestamp
 
+        # Enviamos para todos os outros processos que temos o interesse de utilizar o recurso
         for processo in OUTROS_PROCESSOS:
             conexao = Pyro5.api.Proxy(f"PYRONAME:{processo}")
-            timestamp = time.time()
-            print(conexao.checkState(recurso_escolhido)) 
+            resposta = conexao.receberInscricao(recurso_escolhido, timestamp, NOME_DO_PROCESSO)
 
-        RECURSOS_COMPARTILHADOS[recurso_escolhido] = "HELD"
+            if resposta == "RECURSO_OCUPADO":
+                RECURSOS_COMPARTILHADOS[recurso_escolhido]["aguardando_retorno"].append(processo)
+        
+        # Se a lista estiver vazia, quer dizer que recebemos todas as respostas e 
+        # que podemos utilizar o processo
+        if len(RECURSOS_COMPARTILHADOS[recurso_escolhido]["aguardando_retorno"]) == 0:
+            RECURSOS_COMPARTILHADOS[recurso_escolhido]["status"] = "HELD"
 
     else:
         print("Opção selecionada não existe!!!")
