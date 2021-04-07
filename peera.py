@@ -8,13 +8,15 @@ import time
 
 from base64 import b64decode
 
-
 # Randon seed (Numero aleatorio) para geração das chaves
 random_seed = Random.new().read
 # Gera o par de chaves
 keyPair = RSA.generate(1024, random_seed)
 # Chave publica
 pubKey = keyPair.publickey()
+
+# Numero de processos localizados
+countLocatedProcess = 0
 
 NOME_DO_PROCESSO = "PEER_A"
 
@@ -34,28 +36,24 @@ RECURSOS_COMPARTILHADOS =  {
         "status": "RELEASED",
         "timestamp": None,
         "fila": list(),
-        "vezesRequisitadas": 0,
-        "aguardando_retorno": list() # Problema de quando o mesmo processo requisita o mesmo recurso depois de outro processo ter requisitado
-        # "aguardando_retorno": [["PEER_A"], ["PEER_A", "PEER_C"]]
+        "aguardando_retorno": list() 
     }, 
     "RECURSO_B": {
         "status": "RELEASED",
         "timestamp": None,
         "fila": list(),
-        "vezesRequisitadas": 0,
-        "aguardando_retorno": list() # Problema de quando o mesmo processo requisita o mesmo recurso depois de outro processo ter requisitado
+        "aguardando_retorno": list()
     }
 }
 
 @Pyro5.api.expose
 class ObjetoRemoto(object):
     def receberInscricao(self, digitalSignData, data):
-        global OUTROS_PROCESSOS
-
         # Gera o hash para verificacao com assinatura digital
         chavePublica = b64decode(str(OUTROS_PROCESSOS[data["nomeDoProcesso"]]["chavePublica"]["data"]))
         rsakey = RSA.importKey(chavePublica)
         dataHash = SHA256.new(str(data).encode('utf-8')).digest()
+
 
         # Verifica a autenticidade dos dados, utilizando a chave publica e a assinatura digital recebida
         if(rsakey.verify(dataHash, digitalSignData)):
@@ -88,34 +86,25 @@ class ObjetoRemoto(object):
         # Verifica a autenticidade dos dados, utilizando a chave publica e a assinatura digital recebida
         if(rsakey.verify(dataHash, digitalSignData)):
             # Removemos o processo da lista em que estamos aguardando a resposta
-            for cadaLista in RECURSOS_COMPARTILHADOS[data["recurso"]]["aguardando_retorno"]:
-                try:
-                    cadaLista.remove(data["nomeDoProcesso"])
-                except:
-                    pass
-
-            # Remove listas vazias do aguardando_retorno
-            RECURSOS_COMPARTILHADOS[data["recurso"]]["aguardando_retorno"] = [x for x in RECURSOS_COMPARTILHADOS[data["recurso"]]["aguardando_retorno"] if x != []]
+            
+            RECURSOS_COMPARTILHADOS[data["recurso"]]["aguardando_retorno"].remove(data["nomeDoProcesso"])
 
             # Se a lsita estiver vazia, quer dizer que recebemos todas as respostas e 
             # que podemos utilizar o processo
             # if 0 == -1
-            if len(RECURSOS_COMPARTILHADOS[data["recurso"]]["aguardando_retorno"]) == (RECURSOS_COMPARTILHADOS[data["recurso"]]["vezesRequisitadas"] - 1):
+            if len(RECURSOS_COMPARTILHADOS[data["recurso"]]["aguardando_retorno"]) == 0:
                 RECURSOS_COMPARTILHADOS[data["recurso"]]["status"] = "HELD"
-                RECURSOS_COMPARTILHADOS[data["recurso"]]["vezesRequisitadas"] -= 1
     
+    # Retorna a chave publica do processo
     def getPubKey(self):
         return pubKey.exportKey('DER')
 
 
 def menu():
-    # para cada processo no dicionario, guardaremos a sua respectiva chave publica
-    for key, value in OUTROS_PROCESSOS.items():
-        try:
-            value["objetoRemoto"] = Pyro5.api.Proxy(f"PYRONAME:{key}")
-            value["chavePublica"] = value["objetoRemoto"].getPubKey()
-        except:
-            print("Outros peers offline")
+    # Esperando todos processos entrarem no ar
+    if countLocatedProcess != len(OUTROS_PROCESSOS.items()):
+        time.sleep(0.300)
+        return
 
     # Printa as opções do menu
     print(f"MENU DO PROCESSO {NOME_DO_PROCESSO}")
@@ -154,11 +143,13 @@ def menu():
                 # Assinar o hash
                 digitalSignData = keyPair.sign(dataHash, '')
 
+                OUTROS_PROCESSOS[processo]["objetoRemoto"] = Pyro5.api.Proxy(f"PYRONAME:{processo}")
                 OUTROS_PROCESSOS[processo]["objetoRemoto"].enviarNotificacao(digitalSignData, data)
 
                 # Removemos o pedido da fila
                 processos_notificados.append(processo)
 
+            # Tiramos os processos notificados da fila
             for processo in processos_notificados:
                 RECURSOS_COMPARTILHADOS[recurso_escolhido]["fila"].remove(processo)
 
@@ -167,43 +158,45 @@ def menu():
         else:
             print(f"O {recurso_escolhido} não está em uso por esse processo para ser liberado")
     elif escolha == "3":
-        # Mudamos o status do recurso para WANTED
-        RECURSOS_COMPARTILHADOS[recurso_escolhido]["status"] = "WANTED"
-        # Guardamos o timestamp em que o recurso foi solicitado
-        timestamp = time.time()
-        RECURSOS_COMPARTILHADOS[recurso_escolhido]["timestamp"] = timestamp
+        # Verifica se o recurso já não está em uso
+        if (RECURSOS_COMPARTILHADOS[recurso_escolhido]["status"] != "WANTED" and
+            RECURSOS_COMPARTILHADOS[recurso_escolhido]["status"] != "HELD"):
 
-        aguardandoRetornoTemp = []
-        # Enviamos para todos os outros processos que temos o interesse de utilizar o recurso
-        for key, value in OUTROS_PROCESSOS.items():
-            # Dicionario com os dados a serem enviados
-            data = {
-                "recurso": recurso_escolhido,
-                "timestamp": timestamp,
-                "nomeDoProcesso": NOME_DO_PROCESSO,
-            }
-            # Gera um hash com os dados, após serem transformados em string
-            dataHash = SHA256.new(str(data).encode('utf-8')).digest()
-            # Assinar o hash
-            digitalSignData = keyPair.sign(dataHash, '')
-            
-            # Envia a mensagem solicitando o uso do recurso
-            resposta = value["objetoRemoto"].receberInscricao(digitalSignData, data)
+            # Mudamos o status do recurso para WANTED
+            RECURSOS_COMPARTILHADOS[recurso_escolhido]["status"] = "WANTED"
+            # Guardamos o timestamp em que o recurso foi solicitado
+            timestamp = time.time()
+            RECURSOS_COMPARTILHADOS[recurso_escolhido]["timestamp"] = timestamp
 
-            if resposta == "RECURSO_OCUPADO":
-                aguardandoRetornoTemp.append(key)
+            # Enviamos para todos os outros processos que temos o interesse de utilizar o recurso
+            for key, value in OUTROS_PROCESSOS.items():
+                # Dicionario com os dados a serem enviados
+                data = {
+                    "recurso": recurso_escolhido,
+                    "timestamp": timestamp,
+                    "nomeDoProcesso": NOME_DO_PROCESSO,
+                }
+                # Gera um hash com os dados, após serem transformados em string
+                dataHash = SHA256.new(str(data).encode('utf-8')).digest()
+                # Assinar o hash
+                digitalSignData = keyPair.sign(dataHash, '')
                 
+                # Envia a mensagem solicitando o uso do recurso
+                value["objetoRemoto"] = Pyro5.api.Proxy(f"PYRONAME:{key}")
+                resposta = value["objetoRemoto"].receberInscricao(digitalSignData, data)
 
-        if len(aguardandoRetornoTemp)!= 0:
-            RECURSOS_COMPARTILHADOS[recurso_escolhido]["aguardando_retorno"].append(aguardandoRetornoTemp)
-        RECURSOS_COMPARTILHADOS[recurso_escolhido]["vezesRequisitadas"] += 1
-        
-        # Se a lista estiver vazia, quer dizer que recebemos todas as respostas e 
-        # que podemos utilizar o processo
-        if len(RECURSOS_COMPARTILHADOS[recurso_escolhido]["aguardando_retorno"]) == (RECURSOS_COMPARTILHADOS[recurso_escolhido]["vezesRequisitadas"] - 1):
-            RECURSOS_COMPARTILHADOS[recurso_escolhido]["status"] = "HELD"
-            RECURSOS_COMPARTILHADOS[recurso_escolhido]["vezesRequisitadas"] -= 1
+                # Se alguem respondeu que esta utilizando o recurso, temos que esperar a notificacao 
+                # de que o recurso esta livre
+                if resposta == "RECURSO_OCUPADO":
+                    RECURSOS_COMPARTILHADOS[recurso_escolhido]["aguardando_retorno"].append(key)
 
+            # Se a lista estiver vazia, quer dizer que recebemos todas as respostas e 
+            # que podemos utilizar o processo
+            if len(RECURSOS_COMPARTILHADOS[recurso_escolhido]["aguardando_retorno"]) == 0:
+                RECURSOS_COMPARTILHADOS[recurso_escolhido]["status"] = "HELD"
+                    
+        else:
+            print(f"O {recurso_escolhido} já está sendo utilizado ou está na fila para ser utilizado.")
     else:
         print("Opção selecionada não existe!!!")
 
@@ -211,7 +204,54 @@ def menu():
 def threadFunction(daemon):
     daemon.requestLoop()                   
 
+def findOtherProcess():
+    global countLocatedProcess
+
+    while True:
+        # para cada processo no dicionario, guardaremos a sua respectiva chave publica
+        countLocatedProcess = 0
+        for key, value in OUTROS_PROCESSOS.items():
+            # Verifica se ja temos o objeto remoto, se sim contamos ele
+            if value["objetoRemoto"] != None:
+                countLocatedProcess += 1
+            else:
+                try:
+                    # Tenta pegar o objeto remoto e a chave publica do outro processo
+                    value["objetoRemoto"] = Pyro5.api.Proxy(f"PYRONAME:{key}")
+                    value["chavePublica"] = value["objetoRemoto"].getPubKey()
+                except:
+                    # Se não conseguir resetamos e tentamos de novo na proxima
+                    value["objetoRemoto"] = None
+                    value["chavePublica"] = None
+        
+        # Se ja conectamos e pegamos a chave publica de todos, podemos sair do loop
+        if countLocatedProcess == len(OUTROS_PROCESSOS.items()):
+            print("Objetos Remotos e Chaves Publicas salvas")
+            break
+
+        time.sleep(1)
+
+# Thread que fica rodando o nameserver
+def nameserverThread():
+    Pyro5.nameserver.start_ns_loop()
+
+
+# Inicia o nameserver caso ele ainda esteja rodando
+def startNameServer():
+    try:
+        # Tenta localizar o nameserver
+        ns = Pyro5.api.locate_ns()
+    except:
+        # Se não conseguir inicia o nameserver
+        Pyro5.nameserver.start_ns(host="localhost", port=9091)
+        #Inicia a thread responsavel pro esperar requisições de outros processos
+        thread = threading.Thread(target=nameserverThread)
+        thread.start()
+
 def main():
+    # Inicia o nameserver caso ele ainda não esteja rodando
+    startNameServer()
+
     # Cria um Pyro daemon
     daemon = Pyro5.server.Daemon()         
     #Encontra o servidor de nomes
@@ -222,8 +262,12 @@ def main():
     ns.register(NOME_DO_PROCESSO, uri)   
 
     #Inicia a thread responsavel pro esperar requisições de outros processos
-    x = threading.Thread(target=threadFunction, args=(daemon, ))
-    x.start()
+    thread = threading.Thread(target=threadFunction, args=(daemon, ))
+    thread.start()
+    
+    #Inicia a thread responsavel pro esperar requisições de outros processos
+    thread = threading.Thread(target=findOtherProcess)
+    thread.start()
 
     #Loop infinito do menu
     while True:
